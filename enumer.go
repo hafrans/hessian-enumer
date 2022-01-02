@@ -2,10 +2,11 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"golang.org/x/tools/go/packages"
 	"log"
@@ -17,43 +18,47 @@ import (
 const (
 	EmptyString = ""
 	DefaultBase = 10
+	HessianJavaEnum = "JavaEnum"
 )
 
-type Package struct {
-	name  string
-	defs  map[*ast.Ident]types.Object
-	files []*File
-}
+type (
+	Package struct {
+		name  string
+		path  string
+		defs  map[*ast.Ident]types.Object
+		files []*File
+	}
 
-type File struct {
-	pkg         *Package
-	fileName    string
-	syntaxTree  *ast.File
-	parsed      bool
-	accumulator int64
-	typeName    string
-	typeValues  []*Value
-}
+	File struct {
+		pkg         *Package
+		filePath    string
+		syntaxTree  *ast.File
+		accumulator int64
+		typeName    string
+		typeValues  []*Value
+	}
 
-type Value struct {
-	name   string
-	signed bool
-	value  int64
-	repl   string
-}
+	FileBuffer struct {
+		buffer   bytes.Buffer
+		filePath string
+		file     *File
+	}
 
-type FileBuffer struct {
-	path string
-	fileName string
-	fileSuffix string
-	buffer bytes.Buffer
-}
+	Value struct {
+		name   string
+		signed bool
+		value  int64
+		repl   string
+	}
 
-
-type Generator struct {
-	files []*FileBuffer
-}
-
+	Generator struct {
+		pkgs        []*Package
+		files       []*File
+		fileBuffers []*FileBuffer
+		fileSuffix  string
+		buildTags   []string
+	}
+)
 
 func (v *Value) String() string {
 	if v.repl == EmptyString {
@@ -93,31 +98,159 @@ func main() {
 
 	var tags []string
 	var packageLocations = []string{"./test/"}
+	var _ = "Pill2"
+	var generator Generator = Generator{
+		buildTags: tags,
+	}
 
-	scanPackages(tags, packageLocations...)
-}
+	generator.scanPackages(packageLocations...)
 
+	generator.parseType("Pill")
 
-func traverseNode(node *ast.Node) bool {
-
-	return true
 }
 
 // scan all packages provided by pattern
-func scanPackages(buildTags []string, pattern ...string) {
+func (g *Generator) scanPackages(pattern ...string) {
 
 	pkgCfg := &packages.Config{
 		Mode: packages.NeedFiles | packages.NeedName | packages.NeedSyntax |
 			packages.NeedModule | packages.NeedTypesInfo | packages.NeedTypes,
 		Tests:      false,
-		Context:    context.TODO(),
-		BuildFlags: []string{fmt.Sprintf("-tags=%s", strings.Join(buildTags, " "))},
+		BuildFlags: []string{fmt.Sprintf("-tags=%s", strings.Join(g.buildTags, " "))},
 	}
 
-	_, err := packages.Load(pkgCfg, pattern...)
+	pkgs, err := packages.Load(pkgCfg, pattern...)
 
 	if err != nil {
 		log.Fatalf("fatal error when scan package %s", err)
 	}
 
+	if len(pkgs) == 0 {
+		log.Fatalf("no appropriate packages in pattern %v", pattern)
+	}
+
+	fileLen := len(pkgs[0].Syntax)
+
+	// append package
+	pkg := &Package{
+		path:  pkgs[0].PkgPath,
+		defs:  pkgs[0].TypesInfo.Defs,
+		name:  pkgs[0].Name,
+		files: make([]*File, fileLen),
+	}
+
+	for i := 0; i < fileLen; i++ {
+		pkg.files[i] = &File{
+			pkg:        pkg,
+			syntaxTree: pkgs[0].Syntax[i],
+			filePath:   pkgs[0].GoFiles[i],
+		}
+	}
+
+	g.pkgs = append(g.pkgs, pkg)
+	g.files = append(g.files, pkg.files...)
+
+}
+
+func (g *Generator) parseType(typ string) {
+
+
+	for _, file := range g.files {
+
+		// get all decls
+		DeclLoop:
+		for _, decl := range file.syntaxTree.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+
+			if !ok {
+				continue
+			}
+
+			if genDecl.Tok != token.CONST {
+				continue
+			}
+			// const block
+
+			specs := genDecl.Specs
+			if specs == nil || len(specs) == 0 {
+				continue
+			}
+
+			for _, spec := range specs {
+
+				valueSpec, _ := spec.(*ast.ValueSpec) // all spec in const block is spec
+
+				typ, err := getAndCheckTypeName(valueSpec)
+				if err != nil {
+					continue DeclLoop
+				}
+
+				if typ != "" {
+					if file.typeName == "" {
+						file.typeName = typ
+					} else if file.typeName != typ {
+                        log.Fatalln("multi type in one const block is not allowed.")
+					}
+				}else{
+					if file.typeName == "" {
+						continue DeclLoop
+					}else{
+						typ = file.typeName
+					}
+				}
+
+				// get all Name
+
+			}
+
+		}
+	}
+}
+
+
+func getAndCheckTypeName(valueSpec *ast.ValueSpec) (typ string, err error) {
+	typ = ""
+	err = nil
+
+	if valueSpec == nil {
+		log.Fatalln("encountered an unexpect fatal error: valueSpec is nil")
+	}
+
+	if valueSpec.Type == nil {
+		return "", nil
+	}
+
+	typeIdent, ok := valueSpec.Type.(*ast.Ident)
+
+	if !ok {
+		return "", errors.New("can not cast valueSpec.Type to ast.Ident")
+	}
+
+	typ = typeIdent.Name
+
+	if len(typ) == 0 {
+		return "" , errors.New("typeName is empty when get TypeName")
+	}
+
+	// check it's type
+	if typeIdent.Obj == nil {
+		return "" , errors.New("typeIdent Obj is nil")
+	}
+
+	typeSpec, ok := typeIdent.Obj.Decl.(*ast.TypeSpec)
+	if !ok {
+		return "", errors.New("can not cast typeIdent.Obj.Decl. to *ast.TypeSpec")
+	}
+
+	selectorExpr, ok := typeSpec.Type.(*ast.SelectorExpr)
+
+	if !ok {
+		return "", errors.New("can not cast typeSpec.Type. to *ast.selectorExpr")
+	}
+
+	if selectorExpr.Sel != nil && selectorExpr.Sel.Name == HessianJavaEnum {
+		return typ, nil
+	}
+
+	return "", errors.New("type check failed")
 }
