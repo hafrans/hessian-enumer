@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"golang.org/x/tools/go/packages"
@@ -16,8 +17,9 @@ import (
 )
 
 const (
-	EmptyString = ""
-	DefaultBase = 10
+	EmptyString     = ""
+	DefaultBase     = 10
+	UnderScoreName  = "_"
 	HessianJavaEnum = "JavaEnum"
 )
 
@@ -34,8 +36,7 @@ type (
 		filePath    string
 		syntaxTree  *ast.File
 		accumulator int64
-		typeName    string
-		typeValues  []*Value
+		EnumTypes   map[string][]*Value
 	}
 
 	FileBuffer struct {
@@ -45,10 +46,11 @@ type (
 	}
 
 	Value struct {
-		name   string
-		signed bool
-		value  int64
-		repl   string
+		name     string
+		fullName string
+		signed   bool
+		value    uint64
+		repl     string
 	}
 
 	Generator struct {
@@ -63,9 +65,9 @@ type (
 func (v *Value) String() string {
 	if v.repl == EmptyString {
 		if v.signed {
-			return strconv.FormatInt(v.value, DefaultBase)
+			return strconv.FormatInt(int64(v.value), DefaultBase)
 		} else {
-			return strconv.FormatUint(uint64(v.value), DefaultBase)
+			return strconv.FormatUint(v.value, DefaultBase)
 		}
 	}
 	return v.repl
@@ -79,7 +81,7 @@ var (
 
 func init() {
 	log.SetFlags(0)
-	log.SetPrefix("hessian-enumer ")
+	log.SetPrefix("hessian-enumer:")
 }
 
 func Usage() {
@@ -105,7 +107,7 @@ func main() {
 
 	generator.scanPackages(packageLocations...)
 
-	generator.parseType("Pill")
+	generator.parseType("")
 
 }
 
@@ -144,6 +146,7 @@ func (g *Generator) scanPackages(pattern ...string) {
 			pkg:        pkg,
 			syntaxTree: pkgs[0].Syntax[i],
 			filePath:   pkgs[0].GoFiles[i],
+			EnumTypes:  make(map[string][]*Value),
 		}
 	}
 
@@ -152,13 +155,12 @@ func (g *Generator) scanPackages(pattern ...string) {
 
 }
 
-func (g *Generator) parseType(typ string) {
-
+func (g *Generator) parseType(targetTypeName string) {
 
 	for _, file := range g.files {
 
 		// get all decls
-		DeclLoop:
+	DeclLoop:
 		for _, decl := range file.syntaxTree.Decls {
 			genDecl, ok := decl.(*ast.GenDecl)
 
@@ -175,40 +177,95 @@ func (g *Generator) parseType(typ string) {
 			if specs == nil || len(specs) == 0 {
 				continue
 			}
-
+			curTypeName := ""
+			curTypeValues :=  make([]*Value, 0, 4)
 			for _, spec := range specs {
 
 				valueSpec, _ := spec.(*ast.ValueSpec) // all spec in const block is spec
 
-				typ, err := getAndCheckTypeName(valueSpec)
+				typ, err := getAndCheckTypeName(valueSpec, targetTypeName)
 				if err != nil {
 					continue DeclLoop
 				}
 
 				if typ != "" {
-					if file.typeName == "" {
-						file.typeName = typ
-					} else if file.typeName != typ {
-                        log.Fatalln("multi type in one const block is not allowed.")
+					if _, ok := file.EnumTypes[typ]; !ok {
+						file.EnumTypes[typ] = curTypeValues
+						curTypeName = typ
+					} else if curTypeName != typ {
+						log.Fatalln("multi type in one const block is not allowed.")
 					}
-				}else{
-					if file.typeName == "" {
+				} else {
+					if curTypeName == "" {
 						continue DeclLoop
-					}else{
-						typ = file.typeName
+					} else {
+						typ = curTypeName
 					}
 				}
 
 				// get all Name
+				for _, name := range valueSpec.Names {
+					if name.Name == UnderScoreName {
+						continue
+					}
+					// check Name is with prefix or not
+					if name.Name == typ || strings.Index(name.Name, typ) != 0 {
+						log.Fatalf("the field %s is not with a type name prefix\"%s\"", name.Name, typ)
+					}
+
+					if name.Name[len(typ):] == UnderScoreName {
+						log.Fatalf("the field %s is not allowed", name.Name)
+					}
+
+					typeObj, ok := file.pkg.defs[name]
+
+					if !ok {
+						log.Fatalf("invalid value for constant %s in TypeInfo", name)
+					}
+
+					basicType := typeObj.Type().Underlying().(*types.Basic).Info()
+
+					if basicType&types.IsInteger == 0 {
+						log.Fatalf("can't handle non-integer constant type %s", typ)
+					}
+
+					value := typeObj.(*types.Const).Val() // Guaranteed to succeed as this is CONST.
+					if value.Kind() != constant.Int {
+						log.Fatalf("can't happen: constant is not an integer %s", name)
+					}
+
+					i64, isInt := constant.Int64Val(value)
+					u64, isUint := constant.Uint64Val(value)
+					if !isInt && !isUint {
+						log.Fatalf("internal error: value of %s is not an integer: %s", name, value.String())
+					}
+
+					if !isInt {
+						u64 = uint64(i64)
+					}
+
+					val := &Value{
+						fullName: name.Name,
+						name:     name.Name[len(typ):],
+						value:    u64,
+						signed:   basicType&types.IsUnsigned == 0,
+						repl:     value.String(),
+					}
+
+					file.EnumTypes[curTypeName] = append(file.EnumTypes[curTypeName], val)
+				}
 
 			}
+		}
 
+		if _, ok := file.EnumTypes[targetTypeName]; ok {
+			// search is done. exit.
+			return
 		}
 	}
 }
 
-
-func getAndCheckTypeName(valueSpec *ast.ValueSpec) (typ string, err error) {
+func getAndCheckTypeName(valueSpec *ast.ValueSpec, targetTypeName string) (typ string, err error) {
 	typ = ""
 	err = nil
 
@@ -229,12 +286,16 @@ func getAndCheckTypeName(valueSpec *ast.ValueSpec) (typ string, err error) {
 	typ = typeIdent.Name
 
 	if len(typ) == 0 {
-		return "" , errors.New("typeName is empty when get TypeName")
+		return "", errors.New("typeName is empty when get TypeName")
+	}
+
+	if targetTypeName != "" && typ != targetTypeName {
+		return "", errors.New("typeName is not the targetTypeName")
 	}
 
 	// check it's type
 	if typeIdent.Obj == nil {
-		return "" , errors.New("typeIdent Obj is nil")
+		return "", errors.New("typeIdent Obj is nil")
 	}
 
 	typeSpec, ok := typeIdent.Obj.Decl.(*ast.TypeSpec)
