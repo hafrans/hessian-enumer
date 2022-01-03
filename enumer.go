@@ -59,6 +59,12 @@ type (
 		fileBuffers []*FileBuffer
 		fileSuffix  string
 		buildTags   []string
+		// typeName -> JavaClassName
+		typeClassMap map[string]string
+
+		// if javaClassName not exists in typeClassMap
+		// it use javaPackagePrefix.TypeName as javaClassName
+		javaPackagePrefix string
 	}
 )
 
@@ -168,92 +174,94 @@ func (g *Generator) parseType(targetTypeName string) {
 				continue
 			}
 
-			if genDecl.Tok != token.CONST {
-				continue
-			}
-			// const block
+			if genDecl.Tok == token.CONST {
+				// const block
 
-			specs := genDecl.Specs
-			if specs == nil || len(specs) == 0 {
-				continue
-			}
-			curTypeName := ""
-			curTypeValues :=  make([]*Value, 0, 4)
-			for _, spec := range specs {
-
-				valueSpec, _ := spec.(*ast.ValueSpec) // all spec in const block is spec
-
-				typ, err := getAndCheckTypeName(valueSpec, targetTypeName)
-				if err != nil {
-					continue DeclLoop
+				specs := genDecl.Specs
+				if specs == nil || len(specs) == 0 {
+					continue
 				}
+				curTypeName := ""
+				curTypeValues := make([]*Value, 0, 4)
+				for _, spec := range specs {
 
-				if typ != "" {
-					if _, ok := file.EnumTypes[typ]; !ok {
-						file.EnumTypes[typ] = curTypeValues
-						curTypeName = typ
-					} else if curTypeName != typ {
-						log.Fatalln("multi type in one const block is not allowed.")
-					}
-				} else {
-					if curTypeName == "" {
+					valueSpec, _ := spec.(*ast.ValueSpec) // all specs in const block is ValueSpec
+
+					typ, err := getAndCheckTypeName(valueSpec, targetTypeName)
+					if err != nil {
 						continue DeclLoop
+					}
+
+					if typ != "" {
+						if _, ok := file.EnumTypes[typ]; !ok {
+							file.EnumTypes[typ] = curTypeValues
+							curTypeName = typ
+						} else if curTypeName != typ {
+							log.Fatalln("multi type in one const block is not allowed.")
+						}
 					} else {
-						typ = curTypeName
+						if curTypeName == "" {
+							continue DeclLoop
+						} else {
+							typ = curTypeName
+						}
 					}
+
+					// get all Name
+					for _, name := range valueSpec.Names {
+						if name.Name == UnderScoreName {
+							continue
+						}
+						// check Name is with prefix or not
+						if name.Name == typ || strings.Index(name.Name, typ) != 0 {
+							log.Fatalf("the field %s is not with a type name prefix\"%s\"", name.Name, typ)
+						}
+
+						if name.Name[len(typ):] == UnderScoreName {
+							log.Fatalf("the field %s is not allowed", name.Name)
+						}
+
+						typeObj, ok := file.pkg.defs[name]
+
+						if !ok {
+							log.Fatalf("invalid value for constant %s in TypeInfo", name)
+						}
+
+						basicType := typeObj.Type().Underlying().(*types.Basic).Info()
+
+						if basicType&types.IsInteger == 0 {
+							log.Fatalf("can't handle non-integer constant type %s", typ)
+						}
+
+						value := typeObj.(*types.Const).Val() // Guaranteed to succeed as this is CONST.
+						if value.Kind() != constant.Int {
+							log.Fatalf("can't happen: constant is not an integer %s", name)
+						}
+
+						i64, isInt := constant.Int64Val(value)
+						u64, isUint := constant.Uint64Val(value)
+						if !isInt && !isUint {
+							log.Fatalf("internal error: value of %s is not an integer: %s", name, value.String())
+						}
+
+						if !isInt {
+							u64 = uint64(i64)
+						}
+
+						val := &Value{
+							fullName: name.Name,
+							name:     name.Name[len(typ):],
+							value:    u64,
+							signed:   basicType&types.IsUnsigned == 0,
+							repl:     value.String(),
+						}
+
+						file.EnumTypes[curTypeName] = append(file.EnumTypes[curTypeName], val)
+					}
+
 				}
 
-				// get all Name
-				for _, name := range valueSpec.Names {
-					if name.Name == UnderScoreName {
-						continue
-					}
-					// check Name is with prefix or not
-					if name.Name == typ || strings.Index(name.Name, typ) != 0 {
-						log.Fatalf("the field %s is not with a type name prefix\"%s\"", name.Name, typ)
-					}
-
-					if name.Name[len(typ):] == UnderScoreName {
-						log.Fatalf("the field %s is not allowed", name.Name)
-					}
-
-					typeObj, ok := file.pkg.defs[name]
-
-					if !ok {
-						log.Fatalf("invalid value for constant %s in TypeInfo", name)
-					}
-
-					basicType := typeObj.Type().Underlying().(*types.Basic).Info()
-
-					if basicType&types.IsInteger == 0 {
-						log.Fatalf("can't handle non-integer constant type %s", typ)
-					}
-
-					value := typeObj.(*types.Const).Val() // Guaranteed to succeed as this is CONST.
-					if value.Kind() != constant.Int {
-						log.Fatalf("can't happen: constant is not an integer %s", name)
-					}
-
-					i64, isInt := constant.Int64Val(value)
-					u64, isUint := constant.Uint64Val(value)
-					if !isInt && !isUint {
-						log.Fatalf("internal error: value of %s is not an integer: %s", name, value.String())
-					}
-
-					if !isInt {
-						u64 = uint64(i64)
-					}
-
-					val := &Value{
-						fullName: name.Name,
-						name:     name.Name[len(typ):],
-						value:    u64,
-						signed:   basicType&types.IsUnsigned == 0,
-						repl:     value.String(),
-					}
-
-					file.EnumTypes[curTypeName] = append(file.EnumTypes[curTypeName], val)
-				}
+			} else if genDecl.Tok == token.TYPE {
 
 			}
 		}
@@ -303,15 +311,23 @@ func getAndCheckTypeName(valueSpec *ast.ValueSpec, targetTypeName string) (typ s
 		return "", errors.New("can not cast typeIdent.Obj.Decl. to *ast.TypeSpec")
 	}
 
-	selectorExpr, ok := typeSpec.Type.(*ast.SelectorExpr)
-
-	if !ok {
-		return "", errors.New("can not cast typeSpec.Type. to *ast.selectorExpr")
-	}
-
-	if selectorExpr.Sel != nil && selectorExpr.Sel.Name == HessianJavaEnum {
-		return typ, nil
+	s, err2, done := checkHessianJavaEnumType(ok, typeSpec, typ)
+	if done {
+		return s, err2
 	}
 
 	return "", errors.New("type check failed")
+}
+
+func checkHessianJavaEnumType(ok bool, typeSpec *ast.TypeSpec, typ string) (string, error, bool) {
+	selectorExpr, ok := typeSpec.Type.(*ast.SelectorExpr)
+
+	if !ok {
+		return "", errors.New("can not cast typeSpec.Type. to *ast.selectorExpr"), true
+	}
+
+	if selectorExpr.Sel != nil && selectorExpr.Sel.Name == HessianJavaEnum {
+		return typ, nil, true
+	}
+	return "", nil, false
 }
