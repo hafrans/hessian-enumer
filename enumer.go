@@ -21,6 +21,8 @@ const (
 	DefaultBase     = 10
 	UnderScoreName  = "_"
 	HessianJavaEnum = "JavaEnum"
+	GoHessianHead = "//go:hessian"
+	GoHessianHeadLength = len(GoHessianHead)
 )
 
 type (
@@ -262,6 +264,33 @@ func (g *Generator) parseType(targetTypeName string) {
 				}
 
 			} else if genDecl.Tok == token.TYPE {
+				if len(genDecl.Specs) != 1 {
+					continue
+				}
+				typeSpec, ok := genDecl.Specs[0].(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+
+				if _, err, ok := checkHessianJavaEnumType(ok, typeSpec, ""); err != nil || !ok {
+					// not javaEnum
+					continue
+				}
+
+				// get javaClassName by //go:hessian comment
+				// javaClassName := ""
+				// typeName := typeSpec.Name.Name
+
+				if genDecl.Doc != nil && genDecl.Doc.List != nil && len(genDecl.Doc.List) > 0 {
+					for _, comment := range genDecl.Doc.List {
+						if len(comment.Text) > GoHessianHeadLength && strings.Index(comment.Text, GoHessianHead) == 0 {
+							commandText := strings.TrimSpace(comment.Text[GoHessianHeadLength:])
+							println(commandText)
+							break
+						}
+					}
+				}
+
 
 			}
 		}
@@ -323,11 +352,15 @@ func checkHessianJavaEnumType(ok bool, typeSpec *ast.TypeSpec, typ string) (stri
 	selectorExpr, ok := typeSpec.Type.(*ast.SelectorExpr)
 
 	if !ok {
-		return "", errors.New("can not cast typeSpec.Type. to *ast.selectorExpr"), true
+		return "", errors.New("can not cast typeSpec.Type. to *ast.selectorExpr"), false
 	}
 
 	if selectorExpr.Sel != nil && selectorExpr.Sel.Name == HessianJavaEnum {
 		return typ, nil, true
 	}
 	return "", nil, false
+}
+
+func parseGoHessianHeadComment(comment string) {
+
 }
