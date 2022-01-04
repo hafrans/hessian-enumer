@@ -17,11 +17,14 @@ import (
 )
 
 const (
-	EmptyString     = ""
-	DefaultBase     = 10
-	UnderScoreName  = "_"
-	HessianJavaEnum = "JavaEnum"
-	GoHessianHead = "//go:hessian"
+	EmptyString         = ""
+	DefaultBase         = 10
+	UnderScoreName      = "_"
+	SpaceSeparator      = " "
+	ParameterSeparator  = "="
+	PackageSeparator    = "."
+	HessianJavaEnum     = "JavaEnum"
+	GoHessianHead       = "//go:hessian"
 	GoHessianHeadLength = len(GoHessianHead)
 )
 
@@ -34,11 +37,10 @@ type (
 	}
 
 	File struct {
-		pkg         *Package
-		filePath    string
-		syntaxTree  *ast.File
-		accumulator int64
-		EnumTypes   map[string][]*Value
+		pkg        *Package
+		filePath   string
+		syntaxTree *ast.File
+		EnumTypes  map[string][]*Value
 	}
 
 	FileBuffer struct {
@@ -82,8 +84,8 @@ func (v *Value) String() string {
 }
 
 var (
-	typeNames = flag.String("type", "", "comma-separated list of type names; must be set")
-	className = flag.String("class", "", "canonical java class name (eg. com.hafrans.test.DemoEnum), case sensitive")
+	typeNames = flag.String("path", "", "comma-separated list of path")
+	className = flag.String("package", "", "canonical java package (eg. com.hafrans.test), case sensitive")
 	buildTags = flag.String("tags", "", "comma-separated list of build tags to apply")
 )
 
@@ -94,7 +96,7 @@ func init() {
 
 func Usage() {
 	fmt.Fprintf(os.Stderr, "Usage of hessian2 JavaEnum generator \n")
-	fmt.Fprintf(os.Stderr, "\t hessisan-enumer [flags] -class o.a.s.TestEnum -type Test [directory]")
+	fmt.Fprintf(os.Stderr, "\t hessisan-enumer [flags] - [directory]")
 	fmt.Fprintf(os.Stderr, "Flags:\n")
 	flag.PrintDefaults()
 }
@@ -108,15 +110,19 @@ func main() {
 
 	var tags []string
 	var packageLocations = []string{"./test/"}
+	var javaPackagePrefix = "com.demo"
 	var _ = "Pill2"
 	var generator Generator = Generator{
-		buildTags: tags,
+		buildTags:         tags,
+		typeClassMap:      make(map[string]string),
+		javaPackagePrefix: strings.Trim(javaPackagePrefix, PackageSeparator),
 	}
 
+	log.Println("starting scanning packages")
 	generator.scanPackages(packageLocations...)
-
-	generator.parseType("")
-
+	log.Println("starting parse types")
+	generator.parseType()
+	log.Println("all enum classes is generated.")
 }
 
 // scan all packages provided by pattern
@@ -163,7 +169,7 @@ func (g *Generator) scanPackages(pattern ...string) {
 
 }
 
-func (g *Generator) parseType(targetTypeName string) {
+func (g *Generator) parseType() {
 
 	for _, file := range g.files {
 
@@ -189,7 +195,7 @@ func (g *Generator) parseType(targetTypeName string) {
 
 					valueSpec, _ := spec.(*ast.ValueSpec) // all specs in const block is ValueSpec
 
-					typ, err := getAndCheckTypeName(valueSpec, targetTypeName)
+					typ, err := getAndCheckTypeName(valueSpec, EmptyString)
 					if err != nil {
 						continue DeclLoop
 					}
@@ -214,41 +220,8 @@ func (g *Generator) parseType(targetTypeName string) {
 						if name.Name == UnderScoreName {
 							continue
 						}
-						// check Name is with prefix or not
-						if name.Name == typ || strings.Index(name.Name, typ) != 0 {
-							log.Fatalf("the field %s is not with a type name prefix\"%s\"", name.Name, typ)
-						}
 
-						if name.Name[len(typ):] == UnderScoreName {
-							log.Fatalf("the field %s is not allowed", name.Name)
-						}
-
-						typeObj, ok := file.pkg.defs[name]
-
-						if !ok {
-							log.Fatalf("invalid value for constant %s in TypeInfo", name)
-						}
-
-						basicType := typeObj.Type().Underlying().(*types.Basic).Info()
-
-						if basicType&types.IsInteger == 0 {
-							log.Fatalf("can't handle non-integer constant type %s", typ)
-						}
-
-						value := typeObj.(*types.Const).Val() // Guaranteed to succeed as this is CONST.
-						if value.Kind() != constant.Int {
-							log.Fatalf("can't happen: constant is not an integer %s", name)
-						}
-
-						i64, isInt := constant.Int64Val(value)
-						u64, isUint := constant.Uint64Val(value)
-						if !isInt && !isUint {
-							log.Fatalf("internal error: value of %s is not an integer: %s", name, value.String())
-						}
-
-						if !isInt {
-							u64 = uint64(i64)
-						}
+						basicType, value, u64 := g.ParseConstName(name, typ, file)
 
 						val := &Value{
 							fullName: name.Name,
@@ -278,30 +251,79 @@ func (g *Generator) parseType(targetTypeName string) {
 				}
 
 				// get javaClassName by //go:hessian comment
-				// javaClassName := ""
-				// typeName := typeSpec.Name.Name
-
-				if genDecl.Doc != nil && genDecl.Doc.List != nil && len(genDecl.Doc.List) > 0 {
-					for _, comment := range genDecl.Doc.List {
-						if len(comment.Text) > GoHessianHeadLength && strings.Index(comment.Text, GoHessianHead) == 0 {
-							commandText := strings.TrimSpace(comment.Text[GoHessianHeadLength:])
-							println(commandText)
-							break
-						}
-					}
-				}
-
+				g.ParseComment(genDecl, typeSpec)
 
 			}
-		}
-
-		if _, ok := file.EnumTypes[targetTypeName]; ok {
-			// search is done. exit.
-			return
 		}
 	}
 }
 
+func (g *Generator) ParseConstName(name *ast.Ident, typ string, file *File) (types.BasicInfo, constant.Value, uint64) {
+	// check Name is with prefix or not
+	if name.Name == typ || strings.Index(name.Name, typ) != 0 {
+		log.Fatalf("the field %s is not with a type name prefix\"%s\"", name.Name, typ)
+	}
+
+	if name.Name[len(typ):] == UnderScoreName {
+		log.Fatalf("the field %s is not allowed", name.Name)
+	}
+
+	typeObj, ok := file.pkg.defs[name]
+
+	if !ok {
+		log.Fatalf("invalid value for constant %s in TypeInfo", name)
+	}
+
+	basicType := typeObj.Type().Underlying().(*types.Basic).Info()
+
+	if basicType&types.IsInteger == 0 {
+		log.Fatalf("can't handle non-integer constant type %s", typ)
+	}
+
+	value := typeObj.(*types.Const).Val() // Guaranteed to succeed as this is CONST.
+	if value.Kind() != constant.Int {
+		log.Fatalf("can't happen: constant is not an integer %s", name)
+	}
+
+	i64, isInt := constant.Int64Val(value)
+	u64, isUint := constant.Uint64Val(value)
+	if !isInt && !isUint {
+		log.Fatalf("internal error: value of %s is not an integer: %s", name, value.String())
+	}
+
+	if !isInt {
+		u64 = uint64(i64)
+	}
+	return basicType, value, u64
+}
+
+func (g *Generator) ParseComment(genDecl *ast.GenDecl, typeSpec *ast.TypeSpec) {
+	if genDecl.Doc != nil && genDecl.Doc.List != nil && len(genDecl.Doc.List) > 0 {
+		for _, comment := range genDecl.Doc.List {
+			if len(comment.Text) > GoHessianHeadLength && strings.Index(comment.Text, GoHessianHead) == 0 {
+				commandText := strings.TrimSpace(comment.Text[GoHessianHeadLength:])
+				javaClassName := parseGoHessianHeadComment(commandText)
+				if javaClassName != EmptyString {
+					g.typeClassMap[typeSpec.Name.Name] = javaClassName
+				} else {
+					if g.javaPackagePrefix == EmptyString {
+						log.Fatalln("default java package not specified. if you want to use default package, use -package=. .")
+					}
+
+					strBuilder := strings.Builder{}
+					strBuilder.WriteString(g.javaPackagePrefix)
+					strBuilder.WriteString(PackageSeparator)
+					strBuilder.WriteString(typeSpec.Name.Name)
+
+					g.typeClassMap[typeSpec.Name.Name] = strBuilder.String()
+				}
+				break
+			}
+		}
+	}
+}
+
+// TypeCheck Validation Helper
 func getAndCheckTypeName(valueSpec *ast.ValueSpec, targetTypeName string) (typ string, err error) {
 	typ = ""
 	err = nil
@@ -348,6 +370,7 @@ func getAndCheckTypeName(valueSpec *ast.ValueSpec, targetTypeName string) (typ s
 	return "", errors.New("type check failed")
 }
 
+// Check the type whether is Hessian.JavaEnum
 func checkHessianJavaEnumType(ok bool, typeSpec *ast.TypeSpec, typ string) (string, error, bool) {
 	selectorExpr, ok := typeSpec.Type.(*ast.SelectorExpr)
 
@@ -361,6 +384,31 @@ func checkHessianJavaEnumType(ok bool, typeSpec *ast.TypeSpec, typ string) (stri
 	return "", nil, false
 }
 
-func parseGoHessianHeadComment(comment string) {
+// Parse GoHessian Head Comment.
+// TODO(hafrans): more parameter is needed.
+func parseGoHessianHeadComment(comment string) string {
+	javaClassName := ""
 
+	keyValuePairs := strings.Split(comment, SpaceSeparator)
+	if len(keyValuePairs) == 0 {
+		return javaClassName
+	}
+
+	for _, kv := range keyValuePairs {
+		keyValuePair := strings.Split(kv, ParameterSeparator)
+		if len(keyValuePair) == 1 {
+			// command parameter
+		} else if len(keyValuePair) == 2 {
+			key := keyValuePair[0]
+			val := keyValuePair[1]
+
+			switch key {
+			case "class", "c":
+				javaClassName = val
+			}
+
+		}
+	}
+
+	return javaClassName
 }
