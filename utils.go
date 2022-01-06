@@ -29,11 +29,11 @@ func getAndCheckTypeName(valueSpec *ast.ValueSpec, targetTypeName string) (typ s
 	typ = typeIdent.Name
 
 	if len(typ) == 0 {
-		return "", errors.New("typeName is empty when get TypeName")
+		return "", errors.New("TypeName is empty when get TypeName")
 	}
 
 	if targetTypeName != "" && typ != targetTypeName {
-		return "", errors.New("typeName is not the targetTypeName")
+		return "", errors.New("TypeName is not the targetTypeName")
 	}
 
 	// check it's type

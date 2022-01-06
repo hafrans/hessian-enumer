@@ -17,11 +17,11 @@ type Parser struct {
 	targetFiles   map[*File]struct{}
 	fileSuffix    string
 	buildTags     []string
-	// typeName -> JavaClassName
+	// TypeName -> JavaClassName
 	typeClassMap map[string]string
 
-	// if javaClassName not exists in typeClassMap
-	// it use javaPackagePrefix.TypeName as javaClassName
+	// if JavaClassName not exists in typeClassMap
+	// it use javaPackagePrefix.TypeName as JavaClassName
 	javaPackagePrefix string
 }
 
@@ -151,10 +151,10 @@ func (g *Parser) parseType() {
 					continue
 				}
 
-				// get javaClassName by //go:hessian comment
+				// get JavaClassName by //go:hessian comment
 				g.ParseComment(genDecl, typeSpec)
 
-				// add this file into targetFile
+				// add this File into targetFile
 				g.targetFiles[file] = struct{}{}
 			}
 		}
