@@ -206,22 +206,26 @@ func (g *Parser) ParseComment(genDecl *ast.GenDecl, typeSpec *ast.TypeSpec) {
 			if len(comment.Text) > GoHessianHeadLength && strings.Index(comment.Text, GoHessianHead) == 0 {
 				commandText := strings.TrimSpace(comment.Text[GoHessianHeadLength:])
 				javaClassName := parseGoHessianHeadComment(commandText)
-				if javaClassName != EmptyString {
-					g.typeClassMap[typeSpec.Name.Name] = javaClassName
-				} else {
-					if g.javaPackagePrefix == EmptyString {
-						log.Fatalln("default java package not specified. if you want to use default package, use -package=. .")
-					}
-
-					strBuilder := strings.Builder{}
-					strBuilder.WriteString(g.javaPackagePrefix)
-					strBuilder.WriteString(PackageSeparator)
-					strBuilder.WriteString(typeSpec.Name.Name)
-
-					g.typeClassMap[typeSpec.Name.Name] = strBuilder.String()
-				}
+				g.registerJavaClassName(javaClassName, typeSpec)
 				break
 			}
 		}
+	}
+}
+
+func (g *Parser) registerJavaClassName(javaClassName string, typeSpec *ast.TypeSpec) {
+	if javaClassName != EmptyString {
+		g.typeClassMap[typeSpec.Name.Name] = javaClassName
+	} else {
+		if g.javaPackagePrefix == EmptyString {
+			log.Fatalln("default java package not specified. if you want to use default package, use -package=. .")
+		}
+
+		strBuilder := strings.Builder{}
+		strBuilder.WriteString(g.javaPackagePrefix)
+		strBuilder.WriteString(PackageSeparator)
+		strBuilder.WriteString(typeSpec.Name.Name)
+
+		g.typeClassMap[typeSpec.Name.Name] = strBuilder.String()
 	}
 }

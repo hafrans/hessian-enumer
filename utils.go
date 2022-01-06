@@ -110,6 +110,7 @@ func generateCombinedNamesWithOffset(values []*Value) (string, [][2]int) {
 	for idx, value := range values {
 		names.WriteString(value.name)
 		nameOffset := [...]int{accumulator, accumulator + len(value.name)}
+		accumulator = accumulator + len(value.name)
 		offset[idx] = nameOffset
 	}
 	return names.String(), offset

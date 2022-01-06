@@ -16,8 +16,10 @@ const (
 	DefaultBase         = 10
 	UnderScoreName      = "_"
 	SpaceSeparator      = " "
+	DirectorySeparator  = "/"
 	ParameterSeparator  = "="
 	PackageSeparator    = "."
+	GoFileExtension     = ".go"
 	HessianJavaEnum     = "JavaEnum"
 	GoHessianHead       = "//go:hessian"
 	GoHessianHeadLength = len(GoHessianHead)
