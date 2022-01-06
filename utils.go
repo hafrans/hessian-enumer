@@ -96,3 +96,22 @@ func parseGoHessianHeadComment(comment string) string {
 
 	return javaClassName
 }
+
+func generateCombinedNamesWithOffset(values []*Value) (string, [][2]int) {
+
+	if values == nil || len(values) == 0 {
+		return EmptyString, [][2]int{}
+	}
+
+	var names = strings.Builder{}
+	var offset [][2]int = make([][2]int, 0, len(values))
+	var accumulator int = 0
+
+	for idx, value := range values {
+		names.WriteString(value.name)
+		nameOffset := [...]int{accumulator, accumulator + len(value.name)}
+		offset[idx] = nameOffset
+	}
+	return names.String(), offset
+
+}
